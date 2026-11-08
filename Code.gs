@@ -60,7 +60,7 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
-var GEMINI_MODEL = 'gemini-2.5-flash';
+var GEMINI_MODEL = 'gemini-3.8-flash';
 
 /**
  * Fetches this video's page <title> only (cheap, no AI needed) — purely
