@@ -1,7 +1,7 @@
 /**
  * Trading Strategy Lab — Apps Script backend.
  *
- * Does two things for index.html:
+ * Does three things for index.html:
  *  1. fetchTranscript — asks Gemini (Google's free-tier LLM) to watch the
  *     YouTube video directly by URL and transcribe what's said. Needs a
  *     free Gemini API key (see setup below) but no payment — unlike
@@ -10,11 +10,14 @@
  *     markup directly (no AI, no key) — that method broke for videos
  *     whose caption data isn't exposed in a detectable form; asking
  *     Gemini to watch the video is far more reliable across videos.
- *  2. exportToSheet — appends one row (video link, title, strategy name,
- *     every extracted field, notes) to a Google Sheet in your own Drive —
- *     the sheet is created automatically on first use and its ID is
- *     remembered in this script's own properties, so every export after
- *     that lands in the same sheet. Free, no AI involved.
+ *  2. summarizeTranscript — asks Gemini to summarize whatever transcript
+ *     text is currently in the page (fetched above or pasted manually)
+ *     into a short plain-text paragraph. Same GEMINI_API_KEY as above.
+ *  3. exportToSheet — appends one row (video link, title, strategy name,
+ *     every extracted field, notes, AI summary) to a Google Sheet in
+ *     your own Drive — the sheet is created automatically on first use
+ *     and its ID is remembered in this script's own properties, so every
+ *     export after that lands in the same sheet. Free, no AI involved.
  *
  * One-time setup:
  *  1. script.google.com > New project (or Extensions > Apps Script from a
@@ -44,6 +47,7 @@ function doPost(e) {
   }
   try {
     if (body.action === 'fetchTranscript') return respond(fetchTranscript(body.url));
+    if (body.action === 'summarizeTranscript') return respond(summarizeTranscript(body.transcript));
     if (body.action === 'exportToSheet') return respond(exportToSheet(body));
     return respond({ ok: false, error: 'Unknown action' });
   } catch (err) {
@@ -133,6 +137,58 @@ function fetchTranscript(url) {
   return { ok: true, transcript: text, title: title };
 }
 
+/**
+ * Asks Gemini to summarize whatever transcript text is already in the
+ * page's textarea (pasted manually or fetched above) — plain text
+ * summary, not structured fields. Only needs GEMINI_API_KEY, same as
+ * fetchTranscript, and only ever sends the text itself, not the video.
+ */
+function summarizeTranscript(transcript) {
+  if (!transcript || transcript.trim().length < 30) {
+    return { ok: false, error: 'Transcript is too short to summarize.' };
+  }
+
+  var apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) return { ok: false, error: 'Server is missing its GEMINI_API_KEY script property — see this file\'s setup comment.' };
+
+  var payload = {
+    contents: [{
+      parts: [
+        { text: 'Summarize ONLY the trading strategy described in the following video transcript, in a short, '
+          + 'clear paragraph (4-6 sentences). Focus specifically on the strategy itself — the market/symbol it '
+          + 'trades, the timeframe, the indicators or setup used, and the entry/exit/risk logic — rather than a '
+          + 'general recap of the video (skip intros, sponsor mentions, unrelated commentary, etc.). Plain text '
+          + 'only, no markdown, no headings.\n\n'
+          + 'Transcript:\n"""\n' + transcript.slice(0, 20000) + '\n"""' },
+      ],
+    }],
+  };
+
+  var resp = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent',
+    {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    }
+  );
+
+  var code = resp.getResponseCode();
+  if (code !== 200) {
+    return { ok: false, error: 'Gemini API error (' + code + '): ' + resp.getContentText().slice(0, 300) };
+  }
+
+  var data = JSON.parse(resp.getContentText());
+  var parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts;
+  var text = (parts && parts.map(function (p) { return p.text || ''; }).join('')) || '';
+  text = text.trim();
+
+  if (!text) return { ok: false, error: 'Gemini returned no summary.' };
+  return { ok: true, summary: text };
+}
+
 // Must stay in the same order as index.html's own `defs` array — this is
 // what turns the saved `fields` object into Sheet columns.
 var FIELD_ORDER = [
@@ -179,7 +235,7 @@ function getOrCreateSheet() {
     sheet.setName(SHEET_NAME);
     var header = ['Exported at', 'Video URL', 'Video title', 'Strategy name']
       .concat(FIELD_ORDER.map(function (f) { return f[1]; }))
-      .concat(['Notes']);
+      .concat(['Notes', 'AI Summary']);
     sheet.appendRow(header);
     sheet.setFrozenRows(1);
   }
@@ -196,7 +252,7 @@ function exportToSheet(body) {
   var fields = body.fields || {};
   var row = [new Date(), body.url || '', body.title || '', body.name || 'Untitled strategy']
     .concat(FIELD_ORDER.map(function (f) { return fields[f[0]] || ''; }))
-    .concat([body.notes || '']);
+    .concat([body.notes || '', body.summary || '']);
   sheet.appendRow(row);
   return { ok: true, sheetUrl: sheet.getParent().getUrl() };
 }
