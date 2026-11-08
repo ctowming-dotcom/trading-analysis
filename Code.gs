@@ -1,11 +1,15 @@
 /**
  * Trading Strategy Lab — Apps Script backend.
  *
- * Does one thing for index.html: fetchTranscript pulls a YouTube video's
- * caption track server-side (no CORS restriction applies here, unlike a
- * browser-side fetch) so you don't have to copy it from YouTube by hand.
- * This is a plain web request — no AI/LLM call, no API key, completely
- * free, same as your other Apps Script projects.
+ * Does two things for index.html, both free (no AI/LLM call, no API key):
+ *  1. fetchTranscript — pulls a YouTube video's caption track server-side
+ *     (no CORS restriction applies here, unlike a browser-side fetch) so
+ *     you don't have to copy it from YouTube by hand.
+ *  2. exportToSheet — appends one row (video link, title, strategy name,
+ *     every extracted field, notes) to a Google Sheet in your own Drive —
+ *     the sheet is created automatically on first use and its ID is
+ *     remembered in this script's own properties, so every export after
+ *     that lands in the same sheet.
  *
  * One-time setup:
  *  1. script.google.com > New project (or Extensions > Apps Script from a
@@ -29,6 +33,7 @@ function doPost(e) {
   }
   try {
     if (body.action === 'fetchTranscript') return respond(fetchTranscript(body.url));
+    if (body.action === 'exportToSheet') return respond(exportToSheet(body));
     return respond({ ok: false, error: 'Unknown action' });
   } catch (err) {
     return respond({ ok: false, error: String(err) });
@@ -97,4 +102,72 @@ function fetchTranscript(url) {
 
   if (!text) return { ok: false, error: 'Transcript came back empty. Paste it manually instead.', title: title };
   return { ok: true, transcript: text, title: title };
+}
+
+// Must stay in the same order as index.html's own `defs` array — this is
+// what turns the saved `fields` object into Sheet columns.
+var FIELD_ORDER = [
+  ['market', 'Market / symbol'],
+  ['timeframe', 'Timeframe'],
+  ['indicators', 'Indicators & settings'],
+  ['entryLong', 'Entry — buy/long'],
+  ['entryShort', 'Entry — sell/short'],
+  ['exit', 'Exit / take-profit'],
+  ['stop', 'Stop-loss'],
+  ['trailing', 'Trailing stop / breakeven'],
+  ['risk', 'Position size / risk'],
+  ['tradeMgmt', 'Trade management'],
+  ['session', 'Session / time filter'],
+  ['filters', 'Additional filters'],
+];
+
+var SHEET_NAME = 'Strategies';
+
+/**
+ * Finds (or creates, on first use) a spreadsheet in your Drive to hold
+ * every exported strategy, remembering its ID in this script's own
+ * properties so later exports reuse the same sheet instead of making a
+ * new one each time.
+ */
+function getOrCreateSheet() {
+  var props = PropertiesService.getScriptProperties();
+  var sheetId = props.getProperty('SHEET_ID');
+  var ss;
+  if (sheetId) {
+    try {
+      ss = SpreadsheetApp.openById(sheetId);
+    } catch (err) {
+      ss = null; // sheet was deleted/moved — fall through and make a new one
+    }
+  }
+  if (!ss) {
+    ss = SpreadsheetApp.create('Trading Strategy Lab — Exports');
+    props.setProperty('SHEET_ID', ss.getId());
+  }
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.getSheets()[0];
+    sheet.setName(SHEET_NAME);
+    var header = ['Exported at', 'Video URL', 'Video title', 'Strategy name']
+      .concat(FIELD_ORDER.map(function (f) { return f[1]; }))
+      .concat(['Notes']);
+    sheet.appendRow(header);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/**
+ * Appends one row for a single strategy export — video link/title,
+ * strategy name, every extracted field (in FIELD_ORDER), and the notes
+ * field — to the Sheet from getOrCreateSheet().
+ */
+function exportToSheet(body) {
+  var sheet = getOrCreateSheet();
+  var fields = body.fields || {};
+  var row = [new Date(), body.url || '', body.title || '', body.name || 'Untitled strategy']
+    .concat(FIELD_ORDER.map(function (f) { return fields[f[0]] || ''; }))
+    .concat([body.notes || '']);
+  sheet.appendRow(row);
+  return { ok: true, sheetUrl: sheet.getParent().getUrl() };
 }
