@@ -1,7 +1,7 @@
 /**
  * Trading Strategy Lab — Apps Script backend.
  *
- * Does three things for index.html:
+ * Does four things for index.html:
  *  1. fetchTranscript — asks Gemini (Google's free-tier LLM) to watch the
  *     YouTube video directly by URL and transcribe what's said. Needs a
  *     free Gemini API key (see setup below) but no payment — unlike
@@ -13,7 +13,11 @@
  *  2. summarizeTranscript — asks Gemini to summarize whatever transcript
  *     text is currently in the page (fetched above or pasted manually)
  *     into a short plain-text paragraph. Same GEMINI_API_KEY as above.
- *  3. exportToSheet — appends one row (video link, title, strategy name,
+ *  3. aiKeyNotes — asks Gemini for one key note per aspect of the
+ *     strategy (market, timeframe, indicators, entries, exit, stop,
+ *     risk, etc. — the same 12 aspects as the editable fields below it)
+ *     as a read-only cross-check before filling those fields in by hand.
+ *  4. exportToSheet — appends one row (video link, title, strategy name,
  *     every extracted field, notes, AI summary) to a Google Sheet in
  *     your own Drive — the sheet is created automatically on first use
  *     and its ID is remembered in this script's own properties, so every
@@ -48,6 +52,7 @@ function doPost(e) {
   try {
     if (body.action === 'fetchTranscript') return respond(fetchTranscript(body.url));
     if (body.action === 'summarizeTranscript') return respond(summarizeTranscript(body.transcript));
+    if (body.action === 'aiKeyNotes') return respond(aiKeyNotes(body.transcript));
     if (body.action === 'exportToSheet') return respond(exportToSheet(body));
     return respond({ ok: false, error: 'Unknown action' });
   } catch (err) {
@@ -190,7 +195,8 @@ function summarizeTranscript(transcript) {
 }
 
 // Must stay in the same order as index.html's own `defs` array — this is
-// what turns the saved `fields` object into Sheet columns.
+// what turns the saved `fields` object into Sheet columns, and is also
+// the set of aspects aiKeyNotes below asks Gemini to cover one by one.
 var FIELD_ORDER = [
   ['market', 'Market / symbol'],
   ['timeframe', 'Timeframe'],
@@ -205,6 +211,69 @@ var FIELD_ORDER = [
   ['session', 'Session / time filter'],
   ['filters', 'Additional filters'],
 ];
+
+/**
+ * Asks Gemini to write one short key note per aspect of the strategy
+ * (the same 12 aspects as FIELD_ORDER/index.html's `defs` — market,
+ * timeframe, indicators, entries, exit, stop, etc.), as a single JSON
+ * object keyed by the same field ids. This is a read-only AI pass shown
+ * above the editable fields in "Review your strategy" — it doesn't fill
+ * those fields itself, it's there so you can cross-check them.
+ */
+function aiKeyNotes(transcript) {
+  if (!transcript || transcript.trim().length < 30) {
+    return { ok: false, error: 'Transcript is too short to analyze.' };
+  }
+
+  var apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) return { ok: false, error: 'Server is missing its GEMINI_API_KEY script property — see this file\'s setup comment.' };
+
+  var aspectList = FIELD_ORDER.map(function (f) { return '"' + f[0] + '" (' + f[1] + ')'; }).join(', ');
+  var jsonShape = '{ ' + FIELD_ORDER.map(function (f) { return '"' + f[0] + '": "..."'; }).join(', ') + ' }';
+
+  var payload = {
+    contents: [{
+      parts: [
+        { text: 'Read the following trading video transcript and write one concise key note (1-2 sentences) '
+          + 'for EACH of these aspects: ' + aspectList + '. If the transcript does not mention a given aspect '
+          + 'at all, use the exact string "Not mentioned" for that one instead of guessing.\n\n'
+          + 'Respond with ONLY a JSON object (no markdown fences, no commentary) shaped exactly like this, '
+          + 'using these exact keys: ' + jsonShape + '\n\n'
+          + 'Transcript:\n"""\n' + transcript.slice(0, 20000) + '\n"""' },
+      ],
+    }],
+  };
+
+  var resp = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent',
+    {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    }
+  );
+
+  var code = resp.getResponseCode();
+  if (code !== 200) {
+    return { ok: false, error: 'Gemini API error (' + code + '): ' + resp.getContentText().slice(0, 300) };
+  }
+
+  var data = JSON.parse(resp.getContentText());
+  var parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts;
+  var text = (parts && parts.map(function (p) { return p.text || ''; }).join('')) || '';
+  var jsonText = text.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+
+  var notes;
+  try {
+    notes = JSON.parse(jsonText);
+  } catch (err) {
+    return { ok: false, error: 'Could not parse Gemini\'s response as JSON.', raw: text.slice(0, 500) };
+  }
+
+  return { ok: true, notes: notes };
+}
 
 var SHEET_NAME = 'Strategies';
 

@@ -19,11 +19,19 @@ Gemini API key for the optional backend below.
   stop-loss, trailing stop/breakeven, position size/risk, trade
   management (max positions/pyramiding), trading session/time filter, and
   additional filters/confirmations
+- "AI Strategy Summary" — asks Gemini to summarize just the trading
+  strategy described in whatever transcript is currently on the page
+  (market, timeframe, setup, entry/exit/risk logic — not a general video
+  recap), needs the backend below
+- "AI Key Notes" — asks Gemini for a short key note on every one of the
+  12 strategy aspects below (or "Not mentioned" if the transcript doesn't
+  cover it), as a cross-check before you fill the fields in by hand;
+  needs the backend below
 - Save/export/import a strategy library (stored in the browser)
 - "Export to Google Sheet" — sends the video link, title, strategy name,
-  every extracted field and the notes to a Google Sheet in your own
-  Drive (needs the backend below; the sheet is created automatically the
-  first time you use it)
+  every extracted field, the notes and the AI summary to a Google Sheet
+  in your own Drive (needs the backend below; the sheet is created
+  automatically the first time you use it)
 
 ## Backend setup (`Code.gs`) — optional, enables auto-fetch + the Sheet export
 
@@ -45,8 +53,9 @@ Without this backend, the site still works — paste the transcript
 yourself and click "Extract strategy draft"; "Export strategy" (as a
 `.json` file) still works too, just not "Export to Google Sheet".
 
-`exportToSheet` itself is a plain write, no AI involved — only
-`fetchTranscript` calls Gemini.
+`exportToSheet` itself is a plain write, no AI involved — `fetchTranscript`,
+`summarizeTranscript` and `aiKeyNotes` all call Gemini with the same
+`GEMINI_API_KEY` script property.
 
 ## Planned features
 
