@@ -1,25 +1,36 @@
 /**
  * Trading Strategy Lab — Apps Script backend.
  *
- * Does two things for index.html, both free (no AI/LLM call, no API key):
- *  1. fetchTranscript — pulls a YouTube video's caption track server-side
- *     (no CORS restriction applies here, unlike a browser-side fetch) so
- *     you don't have to copy it from YouTube by hand.
+ * Does two things for index.html:
+ *  1. fetchTranscript — asks Gemini (Google's free-tier LLM) to watch the
+ *     YouTube video directly by URL and transcribe what's said. Needs a
+ *     free Gemini API key (see setup below) but no payment — unlike
+ *     Claude/OpenAI, Gemini's free tier needs no billing on file. This
+ *     replaced an earlier version that scraped YouTube's caption-track
+ *     markup directly (no AI, no key) — that method broke for videos
+ *     whose caption data isn't exposed in a detectable form; asking
+ *     Gemini to watch the video is far more reliable across videos.
  *  2. exportToSheet — appends one row (video link, title, strategy name,
  *     every extracted field, notes) to a Google Sheet in your own Drive —
  *     the sheet is created automatically on first use and its ID is
  *     remembered in this script's own properties, so every export after
- *     that lands in the same sheet.
+ *     that lands in the same sheet. Free, no AI involved.
  *
  * One-time setup:
  *  1. script.google.com > New project (or Extensions > Apps Script from a
  *     throwaway Google Sheet). Paste this whole file in.
- *  2. Deploy > New deployment > type "Web app".
+ *  2. Get a free Gemini API key: aistudio.google.com/apikey (uses your
+ *     Google account, no payment method required for the free tier).
+ *  3. Project Settings (gear icon) > Script Properties > Add property:
+ *     key "GEMINI_API_KEY", value = that key. Never hardcode the key in
+ *     this file — reading it from Script Properties keeps it out of
+ *     this public repo.
+ *  4. Deploy > New deployment > type "Web app".
  *     - Execute as: Me
  *     - Who has access: Anyone
  *     Click Deploy, copy the Web App URL, paste it into index.html's
  *     API_URL constant near the top of its <script>.
- *  3. Whenever you edit this file, make a NEW deployment version (Deploy >
+ *  5. Whenever you edit this file, make a NEW deployment version (Deploy >
  *     Manage deployments > edit the pencil icon > New version) — editing
  *     the code alone does not update a live Web App URL.
  */
@@ -49,58 +60,76 @@ function extractVideoId(url) {
   return m ? m[1] : null;
 }
 
+var GEMINI_MODEL = 'gemini-2.5-flash';
+
 /**
- * Fetches a YouTube video's transcript the same way the popular
- * youtube-transcript-api Python library does: load the watch page, pull
- * the caption track list out of its embedded player config, then fetch
- * the chosen track's own timedtext URL and strip it down to plain text.
- * This is an unofficial method (no public YouTube API exposes transcript
- * text directly) — it can break if YouTube changes its page markup, and
- * only works for videos that have captions (manual or auto-generated) at
- * all. If it fails, index.html's "paste transcript manually" box still
- * works as a fallback.
+ * Fetches this video's page <title> only (cheap, no AI needed) — purely
+ * cosmetic, used for the Sheet export's "Video title" column.
+ */
+function fetchVideoTitle(videoId) {
+  try {
+    var pageResp = UrlFetchApp.fetch('https://www.youtube.com/watch?v=' + videoId, {
+      muteHttpExceptions: true,
+      headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    var html = pageResp.getContentText();
+    var titleMatch = html.match(/<title>([^<]*)<\/title>/);
+    return titleMatch ? titleMatch[1].replace(/ - YouTube$/, '') : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * Asks Gemini to watch the YouTube video directly (passed by URL, not
+ * downloaded) and transcribe what's said. Far more reliable across
+ * videos than scraping YouTube's own caption markup, since it doesn't
+ * depend on a caption track being exposed in a detectable form at all —
+ * Gemini transcribes the spoken audio itself. Needs a free Gemini API
+ * key (see this file's top comment for setup) stored as the
+ * GEMINI_API_KEY script property.
  */
 function fetchTranscript(url) {
   var videoId = extractVideoId(url);
   if (!videoId) return { ok: false, error: 'Could not find a YouTube video ID in that URL.' };
 
-  var pageResp = UrlFetchApp.fetch('https://www.youtube.com/watch?v=' + videoId, {
-    muteHttpExceptions: true,
-    headers: { 'Accept-Language': 'en-US,en;q=0.9' },
-  });
-  var html = pageResp.getContentText();
+  var apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) return { ok: false, error: 'Server is missing its GEMINI_API_KEY script property — see this file\'s setup comment.' };
 
-  var title = '';
-  var titleMatch = html.match(/<title>([^<]*)<\/title>/);
-  if (titleMatch) title = titleMatch[1].replace(/ - YouTube$/, '');
+  var title = fetchVideoTitle(videoId);
 
-  var tracksMatch = html.match(/"captionTracks":(\[[^\]]*\])/);
-  if (!tracksMatch) {
-    return { ok: false, error: 'No captions/transcript found for this video. Paste the transcript manually instead.', title: title };
+  var payload = {
+    contents: [{
+      parts: [
+        { fileData: { fileUri: 'https://www.youtube.com/watch?v=' + videoId } },
+        { text: 'Transcribe everything spoken in this video, as plain text, as accurately as you can. '
+          + 'Do not summarize or add commentary — just the verbatim spoken words in order.' },
+      ],
+    }],
+  };
+
+  var resp = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent',
+    {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    }
+  );
+
+  var code = resp.getResponseCode();
+  if (code !== 200) {
+    return { ok: false, error: 'Gemini API error (' + code + '): ' + resp.getContentText().slice(0, 300), title: title };
   }
 
-  var tracks;
-  try {
-    tracks = JSON.parse(tracksMatch[1].replace(/\\u0026/g, '&'));
-  } catch (err) {
-    return { ok: false, error: 'Could not read the caption track list for this video.', title: title };
-  }
+  var data = JSON.parse(resp.getContentText());
+  var parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts;
+  var text = (parts && parts.map(function (p) { return p.text || ''; }).join('')) || '';
+  text = text.trim();
 
-  var track = tracks.filter(function (t) { return (t.languageCode || '').indexOf('en') === 0; })[0] || tracks[0];
-  if (!track || !track.baseUrl) {
-    return { ok: false, error: 'No usable caption track found for this video.', title: title };
-  }
-
-  var capResp = UrlFetchApp.fetch(track.baseUrl, { muteHttpExceptions: true });
-  var xml = capResp.getContentText();
-  var text = xml
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!text) return { ok: false, error: 'Transcript came back empty. Paste it manually instead.', title: title };
+  if (!text) return { ok: false, error: 'Gemini returned no transcript for this video. Paste it manually instead.', title: title };
   return { ok: true, transcript: text, title: title };
 }
 
